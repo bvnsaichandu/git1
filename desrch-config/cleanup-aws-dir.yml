@@ -1,0 +1,21 @@
+---
+#
+# Clean-up aws cli profile dir
+# Clean-up deployment dir
+#
+    
+- name: Clean aws cli connection details
+  file:
+   state: absent
+   path: "{{item}}"
+  with_items:
+    - "{{ aws_cli_home_dir }}/config"
+    - "{{ aws_cli_home_dir }}/credentials"
+  no_log: true
+  
+- name: Clean deployment dir
+  file:
+   state: absent
+   path: "{{ansible_env.HOME}}/cortex-search-deployment"  
+        
+ 

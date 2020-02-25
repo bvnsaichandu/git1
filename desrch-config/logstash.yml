@@ -1,0 +1,95 @@
+---
+#
+# Installing logstash
+#
+
+- name: HTTPS APT transport for Elasticsearch repository.
+  apt:
+    name: apt-transport-https
+    state: present
+
+- name: Add Elasticsearch apt key.
+  apt_key:
+    url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+    state: present
+
+- name: Adding logstash APT repository
+  apt_repository:
+   repo: "{{ es_repo }}"
+   state: present
+
+- name: Update repositories cache and install Logstash
+  apt:
+   name: logstash
+   update_cache: yes
+
+- name: Ensures /etc/sysconfig dir exists
+  file: path=/etc/sysconfig state=directory
+
+- name: Configure custom config file to pull and digest data from S3 bucket
+  template:
+   src=prophecy_appliance_data.conf.j2
+   dest=/etc/logstash/conf.d/prophecy_appliance_data.conf
+   owner=root
+   group=root
+   mode=0644
+
+- name: Configure custom config file to pull and digest data from S3 bucket
+  template:
+    src=cortex_teams_data.conf.j2
+    dest=/etc/logstash/conf.d/cortex_teams_data.conf
+    owner=root
+    group=root
+    mode=0644
+  when: load_team_id
+
+- name: Configure logstash source file with logstash keystore password env variable
+  template:
+   src=logstash.j2
+   dest=/etc/sysconfig/logstash
+   owner=root
+   group=root
+   mode=0600
+
+- name: Install pexpect
+  pip:
+   name: pexpect
+  become: yes
+
+- name: Copy script for logstash keystore creation
+  template:
+   src=create_logstash_keystore.sh.j2
+   dest=/etc/logstash/create_logstash_keystore.sh
+   owner=root
+   group=root
+   mode=0777
+
+- name: Create logstash keystore with S3 credentials
+  expect:
+   command: /etc/logstash/create_logstash_keystore.sh
+   responses:
+    'Enter value for AWS_ACCESS_KEY_ID': "{{ aws_access_key_id }}"
+    'Enter value for AWS_SECRET_ACCESS_KEY': "{{ aws_secret_access_key }}"
+    'An Logstash keystore already exists. Overwrite': "y"
+  no_log: true
+
+- name: Delete script for logstash keystore creation
+  file:
+   path: /etc/logstash/create_logstash_keystore.sh
+   state: absent
+
+- name: Update logstash log level to info
+  lineinfile:
+   destfile: /etc/logstash/logstash.yml
+   regexp: 'log.level:'
+   line: 'log.level: {{ ls_log_level }}'
+
+- name: Restart Logstash service
+  systemd:
+   name: logstash
+   state: restarted
+
+- name: Enable Logstash service
+  systemd:
+   name: logstash
+   enabled: yes

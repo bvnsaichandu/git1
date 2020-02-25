@@ -1,0 +1,9 @@
+# Installs mamoto on eks cluster.You may wish to run pre-tasks only once.
+
+- hosts: aws_proxy
+  pre_tasks:
+     - name: Install aws eks pre-requisites
+       include_role:
+         name: install-eks-prerequisites
+  roles:
+  - install-matomo

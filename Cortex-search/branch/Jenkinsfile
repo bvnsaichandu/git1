@@ -1,0 +1,326 @@
+Skip to sidebar navigation
+Skip to content
+
+Linked Applications
+Bitbucket
+Projects
+Repositories
+Search for code, commits or repositories
+
+Help
+Alerts1
+Inbox
+
+
+
+Clone
+Create branch
+Create pull request
+Create fork
+Compare
+Source
+Commits
+Branches
+2
+Pull requests
+Forks
+
+APPSOL: Cortex
+cortex-search
+Source
+Branchfeature/CORTEX-686-integrate-build-pipeline-for-cortex-search
+Branch actions
+cortex-search/Jenkinsfile
+
+Bartosz Jablonski
+ committed 
+205dd613a25
+05 Jun 2019
+EditBlameRaw file
+Source viewDiff to previousHistory
+
+
+55
+        ],
+56
+        containers: [
+57
+            containerTemplate(
+58
+                name: 'jnlp',
+59
+                image: imageName,
+60
+                // alwaysPullImage: true,
+61
+                args: '${computer.jnlpmac} ${computer.name}',
+62
+                envVars: [
+63
+                    envVar(key: "DOCKER_CERT_PATH", value: "/home/jenkins/.dockercert"),
+64
+                    envVar(key: "DOCKER_TLS_VERIFY", value: "${env.SHARED_DOCKER_TLS_VERIFY}"),
+65
+                    envVar(key: "DOCKER_HOST", value: "${env.SHARED_DOCKER_HOST}"),
+66
+                    envVar(key: "DOCKER_API_VERSION", value: "${env.SHARED_DOCKER_API_VERSION}")
+67
+                ]
+68
+            )
+69
+        ]
+70
+    ) {
+71
+​
+72
+        node(nodeLabel) {
+73
+​
+74
+            try {
+75
+​
+76
+                stage("Clone repo") {
+77
+​
+78
+                    gitCredentialsId = "pyml-creds-id"
+79
+                    gitRepoUrl = "https://stash.veritas.com/scm/crtx/cortex-search.git"
+80
+                    gitBranchName = env.BRANCH_NAME
+81
+​
+82
+                    gitRefs = cloneRepository {
+83
+                        gitRepoUrl       = this.gitRepoUrl
+84
+                        gitCredentialsId = this.gitCredentialsId
+85
+                        gitBranchName    = this.gitBranchName
+86
+                    }
+87
+​
+88
+                    scmTag = gitRefs.tag ?: gitRefs.branch
+89
+                } // end stage
+90
+                stage("Build & Test Project") {
+91
+                    sh """
+92
+                        mvn install
+93
+                    """
+94
+                } // end stage
+95
+​
+96
+                stage("Package Project & docker Image") {
+97
+                    def version = 'unknown'
+98
+​
+99
+                    if(env.BRANCH_NAME == 'master') {
+100
+                        version = 'latest'
+101
+                    } else {
+102
+                        def name = env.BRANCH_NAME
+103
+                        name = name.replace('bugfix/','').replace('feature/','').replace('hotfix/','')
+104
+                        name = name.replace('-','.').replace('_','.')
+105
+                        version = name.substring(0,Math.min(119, name.length() - 1)) + '-' + env.BUILD_ID
+106
+                    }
+107
+                    docker.withRegistry("https://artifactory-pyml-auto-images-public.cto.veritas.com", "pyml-creds-id") {
+108
+                        def customImage = docker.build("artifactory-pyml-auto-images-public.cto.veritas.com/vep-search:$version")
+109
+                        if(env.BRANCH_NAME == 'master') {
+110
+                            customImage.push()
+111
+                        }
+112
+                    }
+113
+                }
+114
+​
+115
+                stage("Deploy Elasticsearch") {
+116
+                    if (params.DEPLOY_ELASTICSEARCH) {
+117
+​
+118
+                        gitCredentialsId = "pyml-creds-id"
+119
+                        gitConfigRepoUrl = "https://stash.veritas.com/scm/crtx/cortex-search-config.git"
+120
+                        gitConfigBranchName = params.BRANCH_NAME_OR_TAG
+121
+​
+122
+                        gitConfigRefs = cloneRepository {
+123
+                            gitRepoUrl       = this.gitConfigRepoUrl
+124
+                            gitCredentialsId = this.gitCredentialsId
+125
+                            gitBranchName    = this.gitConfigBranchName
+126
+                        }
+127
+​
+128
+                        scmTag = gitConfigRefs.tag ?: gitConfigRefs.branch
+129
+​
+130
+                        echo "Clonned VEP-CONIFIG-SEARCH!"
+131
+​
+132
+                        sh """#!/bin/bash
+133
+                        cd deployment
+134
+                        echo 'Deploying elasticsearch'
+135
+                        echo ${params.ANSIBLE_VAULT_PASS} >> /tmp/passwd.txt
+136
+                        ansible-playbook -i hosts site.yml --extra-vars '@passwd.yml' --vault-password-file /tmp/passwd.txt
+137
+                        """
+138
+                    }
+139
+                }  // end stage
+140
+​
+141
+                stage("Deploy Search API and UI") {
+142
+                    if(params.DEPLOY_SEARCH) {
+143
+                        gitCredentialsId = "pyml-creds-id"
+144
+                        gitConfigRepoUrl = "https://stash.veritas.com/scm/crtx/cortex-search-config.git"
+145
+                        gitConfigBranchName = params.BRANCH_NAME_OR_TAG
+146
+​
+147
+                        gitConfigRefs = cloneRepository {
+148
+                            gitRepoUrl       = this.gitConfigRepoUrl
+149
+                            gitCredentialsId = this.gitCredentialsId
+150
+                            gitBranchName    = this.gitConfigBranchName
+151
+                        }
+152
+​
+153
+                        scmTag = gitConfigRefs.tag ?: gitConfigRefs.branch
+154
+​
+155
+                        echo "Clonned VEP-CONIFIG-SEARCH!"
+156
+​
+157
+                        sh """#!/bin/bash
+158
+                        cd deployment
+159
+                        echo 'Deploying vep-search'
+160
+                        echo ${params.ANSIBLE_VAULT_PASS} >> /tmp/passwd.txt
+161
+                        chmod 400 ./ssh_keys/*.pem
+162
+                        ansible-playbook -i hosts vep-search-k8s.yml --extra-vars '@passwd.yml' --vault-password-file /tmp/passwd.txt
+163
+                        """
+164
+                    }
+165
+                }  // end stage
+166
+            }
+167
+            catch(IllegalStateException ex) {
+168
+                // This is thrown from cloneRepository step in case of intermediate commit build
+169
+                currentBuild.result = currentBuild.result ?: "NOT_BUILT"
+170
+                println ex.getMessage()
+171
+            }
+172
+            catch(Exception e) {
+173
+                // If there was an exception thrown, the build failed
+174
+                currentBuild.result = "FAILURE"
+175
+                println e.getMessage()
+176
+                throw e
+177
+​
+178
+            } finally {
+179
+​
+180
+                stage("Run post-build tasks") {
+181
+​
+182
+                    resetScm {}
+183
+​
+184
+                    if (currentBuild.result != "NOT_BUILT") {
+185
+                        notifyBuild {
+186
+                            // Use your team's DL here
+187
+                            postDataToELK  = true
+188
+                            projectContact = "DL-VTAS-DUB-PROPHECY@veritas.com"
+189
+                        }
+190
+                    }
+191
+                } // end stage
+192
+            } // end finally
+193
+        } // end node
+194
+    } // end podTemplate
+195
+} // end timeout
+
+

@@ -1,0 +1,353 @@
+// vim:filetype=groovy:tabstop=4:shiftwidth=4:expandtab:
+@Library(['vpl']) _
+
+properties([
+    parameters([
+        string(
+          name: 'ENVIRONMENT',
+          defaultValue: 'dev',
+          description: "Please specify environment that you want to deploy to: ('dev','prod')"
+        ),
+        booleanParam(
+            name:         'DEPLOY_ELK_AWS',
+            defaultValue: false,
+            description:  'Make it true if you want to deploy Logstash, Elasticsearch on AWS'
+        ),
+        booleanParam(
+            name:         'DEPLOY_SEARCH_AWS',
+            defaultValue: false,
+            description:  'Make it true if you want to deploy search api and search ui on AWS'
+        ),
+        booleanParam(
+            name:         'DEPLOY_MATOMO_AWS',
+            defaultValue: false,
+            description:  'Make it true if you want to deploy matomo on AWS'
+        ),
+        booleanParam(
+            name:         'DEPLOY_LOG_AGGR_TOOLS_AWS',
+            defaultValue: false,
+            description:  'Make it true if you want to deploy Log aggr tools on AWS'
+        ),
+        string(
+            name:         'BRANCH_NAME_OR_TAG',
+            defaultValue: 'master',
+            description:  'Please Enter Branch name or master for cortex-search-config'
+        ),
+        password(
+            name:         'ANSIBLE_VAULT_PASS',
+            defaultValue: '****',
+            description:  'Please Enter the Password for Ansible Vault'
+        )
+
+    ]),
+    pipelineTriggers([
+        pollSCM('')
+    ]),
+    buildDiscarder(
+        logRotator(
+            daysToKeepStr: '20',
+            artifactDaysToKeepStr: '60'
+        )
+    ),
+    disableConcurrentBuilds()
+])
+
+timeout(45) {
+    String buildTag = "${env.BUILD_TAG}"
+    String nodeLabel = env.BUILD_TAG.reverse().take(63).reverse().replaceAll('%2F', '-').replaceAll(/^\-/, '')
+    String imageName = "artifactory-pyml-auto-images-public.cto.veritas.com/pyml-jdk-slave:v4"
+    podTemplate(
+        label: nodeLabel,
+        volumes: [
+            secretVolume(
+                secretName: 'dockerhost-secret-files',
+                // A docker login will store auth tokens at ~/.docker/config.json
+                // If this is a secretVolume, kubernetes may update the volume to the state it knows of
+                // That means config.json may get lost
+                // Mount to another path instead and expose using DOCKER_CERT_PATH
+                mountPath: '/home/jenkins/.dockercert'
+            )
+        ],
+        containers: [
+            containerTemplate(
+                name: 'jnlp',
+                image: imageName,
+                alwaysPullImage: true,
+                args: '${computer.jnlpmac} ${computer.name}',
+                envVars: [
+                    envVar(key: "DOCKER_CERT_PATH", value: "/home/jenkins/.dockercert"),
+                    envVar(key: "DOCKER_TLS_VERIFY", value: "${env.SHARED_DOCKER_TLS_VERIFY}"),
+                    envVar(key: "DOCKER_HOST", value: "${env.SHARED_DOCKER_HOST}"),
+                    envVar(key: "DOCKER_API_VERSION", value: "${env.SHARED_DOCKER_API_VERSION}")
+                ]
+            )
+        ]
+    ) {
+
+        node(nodeLabel) {
+            //validate parameters
+            try {
+                stage("Clone repo") {
+                    gitCredentialsId = "pyml-creds-id"
+                    gitRepoUrl = "https://stash.veritas.com/scm/crtx/cortex-search.git"
+                    gitBranchName = env.BRANCH_NAME
+
+                    gitRefs = cloneRepository {
+                        gitRepoUrl       = this.gitRepoUrl
+                        gitCredentialsId = this.gitCredentialsId
+                        gitBranchName    = this.gitBranchName
+                    }
+
+                    scmTag = gitRefs.tag ?: gitRefs.branch
+                } // end stage
+                stage("Build & Test Project") {
+                    if(params.ENVIRONMENT != "prod") {
+                        sh """
+                            mvn install
+                        """
+                    }
+                } // end stage
+
+                stage("Package Project & docker Image") {
+                    if(params.ENVIRONMENT != "prod") {
+                        def version = 'unknown'
+                        def tag = 'unknown'
+                        GIT_COMMIT_HASH = sh (
+                            script: "git reflog show origin/${env.BRANCH_NAME} --pretty=\'%h\' -n 1",
+                            returnStdout: true
+                        ).trim()
+                        GIT_COMMIT_DATE = sh (
+                            script: "git reflog show origin/${env.BRANCH_NAME} --pretty=\'%gd\' --date=format:%Y%m%d%H%M -n 1",
+                            returnStdout: true
+                        ).trim().replace("origin/${env.BRANCH_NAME}@{",'').replace('}','')
+
+                        if(env.BRANCH_NAME == 'master') {
+                            version = 'latest'
+                        } else if(env.BRANCH_NAME.startsWith('release/')) {
+                            def name = env.BRANCH_NAME
+                            name = name.replace('release/','')
+                            name = name.replace('-','.').replace('_','.')
+                            version = "${name}-latest"
+                            tag = "${name}-${GIT_COMMIT_DATE}-${GIT_COMMIT_HASH}" //1.0-201811011054-ldj32h
+                        } else {
+                            def name = env.BRANCH_NAME
+                            name = name.replace('bugfix/','').replace('feature/','').replace('hotfix/','')
+                            name = name.replace('-','.').replace('_','.')
+                            version = name.substring(0,Math.min(119, name.length() - 1)) + '-' + env.BUILD_ID
+                        }
+                        docker.withRegistry("https://artifactory-pyml-auto-images-snapshots.cto.veritas.com", "pyml-creds-id") {
+                            def customImage = docker.build("artifactory-pyml-auto-images-snapshots.cto.veritas.com/cortex-search-api:$version")
+                            if(env.BRANCH_NAME == 'master') {
+                                customImage.push()
+                            } else if (env.BRANCH_NAME.startsWith('release/')) {
+                                customImage.push()
+                                customImage.push(tag)
+                                sh "docker rmi artifactory-pyml-auto-images-snapshots.cto.veritas.com/cortex-search-ui:$tag"
+                            }
+                            // Clean up image tagged using commit
+                            sh "docker rmi artifactory-pyml-auto-images-snapshots.cto.veritas.com/cortex-search-api:$version"
+                        }
+                    }
+                } //end stage
+                           
+                stage("Deploy ELK on AWS") {
+                    if (params.DEPLOY_ELK_AWS) {
+
+                        gitCredentialsId = "pyml-creds-id"
+                        gitConfigRepoUrl = "https://stash.veritas.com/scm/crtx/cortex-search-config.git"
+                        gitConfigBranchName = params.BRANCH_NAME_OR_TAG
+
+                        gitConfigRefs = cloneRepository {
+                            gitRepoUrl       = this.gitConfigRepoUrl
+                            gitCredentialsId = this.gitCredentialsId
+                            gitBranchName    = this.gitConfigBranchName
+                        }
+
+                        scmTag = gitConfigRefs.tag ?: gitConfigRefs.branch
+
+                        echo "Clonned CORTEX-CONIFIG-SEARCH!"
+
+                        sh """#!/bin/bash
+                            cd deployment
+                            echo ${params.ANSIBLE_VAULT_PASS} >> /tmp/passwd.txt
+                          """
+                        if(params.ENVIRONMENT == 'dev') {
+                            echo "Deploying ELK on AWS into environment: ${params.ENVIRONMENT}"
+                            sh """#!/bin/bash
+                                cd deployment
+                                ansible-vault view ssh_keys/vep_search_dev.pem  --vault-password-file /tmp/passwd.txt >> /tmp/sshkey.txt
+                                chmod 400 /tmp/sshkey.txt
+                                ansible-playbook -i development elk.yml --extra-vars '@passwd.yml' --extra-vars 'ansible_system_user=ubuntu' --vault-password-file /tmp/passwd.txt --private-key=/tmp/sshkey.txt
+                                rm -rf /tmp/sshkey.txt /tmp/passwd.txt
+                            """
+                        } else if(params.ENVIRONMENT == "prod") {
+                            echo "Deploying ELK on AWS into environment: ${params.ENVIRONMENT}"
+                            sh """#!/bin/bash
+                                cd deployment
+                                ansible-vault view ssh_keys/cortex_prod.pem  --vault-password-file /tmp/passwd.txt >> /tmp/sshkey.txt
+                                chmod 400 /tmp/sshkey.txt
+                                ansible-playbook -i production elk.yml --extra-vars '@prod-passwd.yml' --extra-vars 'ansible_system_user=ubuntu' --vault-password-file /tmp/passwd.txt --private-key=/tmp/sshkey.txt
+                                rm -rf /tmp/sshkey.txt /tmp/passwd.txt
+                            """
+                        }
+                    }
+                }  // end stage
+                
+ 				        stage("Deploy Search API and UI on AWS") {
+                    if(params.DEPLOY_SEARCH_AWS) {
+                        gitCredentialsId = "pyml-creds-id"
+                        gitConfigRepoUrl = "https://stash.veritas.com/scm/crtx/cortex-search-config.git"
+                        gitConfigBranchName = params.BRANCH_NAME_OR_TAG
+
+                        gitConfigRefs = cloneRepository {
+                            gitRepoUrl       = this.gitConfigRepoUrl
+                            gitCredentialsId = this.gitCredentialsId
+                            gitBranchName    = this.gitConfigBranchName
+                        }
+
+                        scmTag = gitConfigRefs.tag ?: gitConfigRefs.branch
+
+                        echo "Clonned CORTEX-SEARCH-CONFIG!"
+                        sh """#!/bin/bash
+                            ansible-galaxy install andrewrothstein.kubectl
+                            cd deployment
+                            echo ${params.ANSIBLE_VAULT_PASS} >> /tmp/passwd.txt
+                            chmod 400 ./ssh_keys/*.pem
+                        """
+                        if(params.ENVIRONMENT == 'dev') {
+                            echo "Deploying Search API into environment: ${params.ENVIRONMENT}"
+                            sh """#!/bin/bash
+                                echo 'Deploying cortex-search'
+                                cd deployment
+                                ansible-playbook -i development cortex-search-eks.yml --extra-vars '@passwd.yml' --vault-password-file /tmp/passwd.txt
+                                rm -rf /tmp/passwd.txt
+                            """
+                        } else if(params.ENVIRONMENT == "prod") {
+                            echo "Deploying Search API into environment: ${params.ENVIRONMENT}"
+                            sh """#!/bin/bash
+                                echo 'Deploying cortex-search'
+                                cd deployment
+                                ansible-playbook -i production cortex-search-eks.yml --extra-vars '@prod-passwd.yml' --vault-password-file /tmp/passwd.txt
+                                rm -rf /tmp/passwd.txt
+                            """
+                        }
+                    }
+                }  // end stage
+
+                stage("Deploy Matomo on AWS") {
+                     if(params.DEPLOY_MATOMO_AWS) {
+                         gitCredentialsId = "pyml-creds-id"
+                         gitConfigRepoUrl = "https://stash.veritas.com/scm/crtx/cortex-search-config.git"
+                         gitConfigBranchName = params.BRANCH_NAME_OR_TAG
+
+                         gitConfigRefs = cloneRepository {
+                             gitRepoUrl       = this.gitConfigRepoUrl
+                             gitCredentialsId = this.gitCredentialsId
+                             gitBranchName    = this.gitConfigBranchName
+                         }
+
+                         scmTag = gitConfigRefs.tag ?: gitConfigRefs.branch
+
+                                echo "Clonned CORTEX-SEARCH-CONFIG!"
+                                sh """#!/bin/bash
+                                    ansible-galaxy install andrewrothstein.kubectl
+                                    cd deployment
+                                    echo ${params.ANSIBLE_VAULT_PASS} >> /tmp/passwd.txt
+                                    chmod 400 ./ssh_keys/*.pem
+                                """
+                                if(params.ENVIRONMENT == 'dev') {
+                                    echo "Deploying MATOMO into environment: ${params.ENVIRONMENT}"
+                                    sh """#!/bin/bash
+                                        echo 'Deploying MATOMO'
+                                        cd deployment
+                                        ansible-playbook -i development install-matomo.yml --extra-vars '@passwd.yml' --vault-password-file /tmp/passwd.txt
+                                        rm -rf /tmp/passwd.txt
+                                    """
+                                } else if(params.ENVIRONMENT == "prod") {
+                                    echo "Deploying MATOMO into environment: ${params.ENVIRONMENT}"
+                                    sh """#!/bin/bash
+                                        echo 'Deploying MATOMO'
+                                        cd deployment
+                                        ansible-playbook -i production install-matomo.yml --extra-vars '@prod-passwd.yml' --vault-password-file /tmp/passwd.txt
+                                        rm -rf /tmp/passwd.txt
+                                    """
+                                }
+                     }
+                }  // end stage
+                
+                stage("Deploy Log Aggr Tools on AWS") {
+                    if(params.DEPLOY_LOG_AGGR_TOOLS_AWS) {
+                        gitCredentialsId = "pyml-creds-id"
+                        gitConfigRepoUrl = "https://stash.veritas.com/scm/crtx/cortex-search-config.git"
+                        gitConfigBranchName = params.BRANCH_NAME_OR_TAG
+
+                        gitConfigRefs = cloneRepository {
+                            gitRepoUrl       = this.gitConfigRepoUrl
+                            gitCredentialsId = this.gitCredentialsId
+                            gitBranchName    = this.gitConfigBranchName
+                        }
+
+                        scmTag = gitConfigRefs.tag ?: gitConfigRefs.branch
+
+                        echo "Clonned CORTEX-SEARCH-CONFIG!"
+                        sh """#!/bin/bash
+                            ansible-galaxy install andrewrothstein.kubectl geerlingguy.kibana                            
+                            cd deployment
+                            echo ${params.ANSIBLE_VAULT_PASS} >> /tmp/passwd.txt
+                            chmod 400 ./ssh_keys/*.pem
+                        """
+                        if(params.ENVIRONMENT == 'dev') {
+                            echo "Deploying Search API into environment: ${params.ENVIRONMENT}"
+                            sh """#!/bin/bash
+                                echo 'Deploying Log monitoring tools'
+                                cd deployment
+                                ansible-vault view ssh_keys/vep_search_dev.pem --vault-password-file /tmp/passwd.txt >> /tmp/sshkey.txt
+                                chmod 400 /tmp/sshkey.txt
+                                ansible-playbook -i development install-kibana.yml --extra-vars '@passwd.yml' --extra-vars 'ansible_system_user=ubuntu' --vault-password-file /tmp/passwd.txt --private-key=/tmp/sshkey.txt                     
+                                ansible-playbook -i development install-filebeat.yml --extra-vars '@passwd.yml' --vault-password-file /tmp/passwd.txt                              
+                                rm -rf /tmp/sshkey.txt /tmp/passwd.txt
+                            """
+                        } else if(params.ENVIRONMENT == "prod") {
+                            echo "Deploying Search API into environment: ${params.ENVIRONMENT}"
+                            sh """#!/bin/bash
+                                echo 'Deploying Log monitoring tools'
+                                cd deployment
+                                ansible-vault view ssh_keys/cortex_prod.pem --vault-password-file /tmp/passwd.txt >> /tmp/sshkey.txt
+                                chmod 400 /tmp/sshkey.txt                                
+                                ansible-playbook -i production install-kibana.yml --extra-vars '@prod-passwd.yml' --extra-vars 'ansible_system_user=ubuntu' --vault-password-file /tmp/passwd.txt --private-key=/tmp/sshkey.txt
+                                ansible-playbook -i production install-filebeat.yml --extra-vars '@prod-passwd.yml' --vault-password-file /tmp/passwd.txt
+                                rm -rf /tmp/sshkey.txt /tmp/passwd.txt
+                            """
+                        }
+                    }
+                }  // end stage
+            }
+            catch(IllegalStateException ex) {
+                // This is thrown from cloneRepository step in case of intermediate commit build
+                currentBuild.result = currentBuild.result ?: "NOT_BUILT"
+                println ex.getMessage()
+            }
+            catch(Exception e) {
+                // If there was an exception thrown, the build failed
+                currentBuild.result = "FAILURE"
+                println e.getMessage()
+                throw e
+
+            } finally {
+
+                stage("Run post-build tasks") {
+
+                    resetScm {}
+
+                    if (currentBuild.result != "NOT_BUILT") {
+                        notifyBuild {
+                            // Use your team's DL here
+                            postDataToELK  = true
+                            projectContact = "DL-VTAS-DUB-PROPHECY@veritas.com"
+                        }
+                    }
+                } // end stage
+            } // end finally
+        } // end node
+    } // end podTemplate
+} // end timeout

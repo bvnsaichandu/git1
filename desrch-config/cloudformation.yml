@@ -1,0 +1,130 @@
+---
+#
+# Installing aws cloudformation templates for ELK, AWS EKS and node-group
+#
+ - name: Clean-up aws cli profile and deployment dir
+   include_role:
+    name: cleanup-aws-dir
+
+ - name: AWS login
+   include_role:
+    name: aws-login
+
+ - name: Create deployment dir
+   file:
+    path: "{{ansible_env.HOME}}/cortex-search-deployment/{{ cortex_infrastructure_ver }}"
+    state: directory
+  
+ - name: Copy cloudformation templates for ELK, EKS and node-group
+   template: src="{{ item }}" dest="{{ansible_env.HOME}}/cortex-search-deployment/{{item}}"
+   with_items:
+    - "{{ cortex_infrastructure_ver }}/elk.cloudformation.yml"
+    - "{{ cortex_infrastructure_ver }}/eks.cloudformation.yml"
+    - "{{ cortex_infrastructure_ver }}/vpc.cloudformation.yml"
+
+ - name: Create AWS Cortex Search Infrastructure for VPC
+   cloudformation:
+    stack_name: "{{ cortex_search_vpc_stack }}"
+    state: "present"
+    region: "{{ region }}"
+    template: "{{ansible_env.HOME}}/cortex-search-deployment/{{ cortex_infrastructure_ver }}/vpc.cloudformation.yml"
+    termination_protection: "{{ stack_termination_protection }}"
+    tags:
+      stack: "{{ cortex_search_vpc_stack }}"
+      project: "{{ project }}"
+      env: "{{ env }}"
+   when: enable_vpc_stack
+
+ - name: Exit playbook after vpc creation if creating vpc at all 
+   meta: end_play
+   when: enable_vpc_stack       
+
+ - name: Copy file aws-auth-cm.yml seprately as some var are not supposed to be replaced.
+   copy:
+    src: roles/cloudformation/templates/{{ cortex_infrastructure_ver }}/aws-auth-cm.yml
+    dest: "{{ansible_env.HOME}}/cortex-search-deployment/{{ cortex_infrastructure_ver }}/aws-auth-cm.yml"
+    follow: yes
+    mode: 0644
+        
+ - name: Create AWS Cortex Search Infrastructure for ELK stack
+   cloudformation:
+    stack_name: "{{ cortex_search_elk_stack }}"
+    state: "present"
+    region: "{{ region }}"
+    template: "{{ansible_env.HOME}}/cortex-search-deployment/{{ cortex_infrastructure_ver }}/elk.cloudformation.yml"
+    termination_protection: "{{ stack_termination_protection }}"
+    tags:
+      stack: "{{ cortex_search_elk_stack }}"
+      project: "{{ project }}"
+      env: "{{ env }}"
+   when: enable_elk_stack
+      
+ - name: Create Tag to public subnet for External Load Balancers.
+   command: "aws ec2 create-tags --resources {{ cortex_public_subnet_id_2 }} --tags Key=kubernetes.io/role/elb,Value=1"
+ 
+ - name: Create Tag to private Subnets for creating Internal Load Balencer.
+   command: "aws ec2 create-tags --resources {{ cortex_private_subnet_id_2 }} {{ cortex_private_subnet_id_3 }} --tags Key=kubernetes.io/role/internal-elb,Value=1"
+          
+ - name: Create AWS Cortex Search Infrastructure for EKS cluster
+   cloudformation:
+    stack_name: "{{ cortex_search_eks_stack }}"
+    state: "present"
+    region: "{{ region }}"
+    template: "{{ansible_env.HOME}}/cortex-search-deployment/{{ cortex_infrastructure_ver }}/eks.cloudformation.yml"
+    termination_protection: "{{ stack_termination_protection }}"
+    tags:
+      stack: "{{ cortex_search_eks_stack }}"
+      project: "{{ project }}"
+      env: "{{ env }}"
+   when: enable_eks_stack
+   
+ - name: Create kubeconfig file to manage eks cluster
+   command: "aws eks --region {{ region }} update-kubeconfig --name {{ eks_cluster_name }}"
+  
+ - name: Get control plane security group details 
+   ec2_group_facts:
+    filters:
+      group-name: "{{ eks_cluster_control_plane_security_group }}"
+   register: clusterControlPlaneSecurityGroup_results   
+   
+ - name: Extract clusterControlPlaneSecurityGroupId from json object
+   set_fact: 
+    clusterControlPlaneSecurityGroupId: "{{ clusterControlPlaneSecurityGroup_results.security_groups[0].group_id }}"
+    
+ - name: Copy cloudformation templates node-group
+   template: src="{{ cortex_infrastructure_ver }}/node-group.cloudformation.yml" dest="{{ansible_env.HOME}}/cortex-search-deployment/{{ cortex_infrastructure_ver }}/node-group.cloudformation.yml"
+               
+ - name: AWS Cortex Search Infrastructure for EKS cluster node group
+   cloudformation:
+    stack_name: "{{ cortex_search_node_group_stack }}"
+    state: "present"
+    region: "{{ region }}"
+    template: "{{ansible_env.HOME}}/cortex-search-deployment/{{ cortex_infrastructure_ver }}/node-group.cloudformation.yml"
+    termination_protection: "{{ stack_termination_protection }}"
+    tags:
+      stack: "{{ cortex_search_node_group_stack }}"
+      project: "{{ project }}"
+      env: "{{ env }}"
+   when: enable_nodeGroup_stack
+   
+ - name: Get NodeInstanceRole details
+   iam_role_facts:
+      name: "{{ cortex_search_node_instance_role }}"
+   register: nodeInstanceRole_results
+       
+ - name: Extract clusterControlPlaneSecurityGroupId from json object
+   set_fact: 
+    nodeInstanceRole_arn : "{{ nodeInstanceRole_results.iam_roles[0].instance_profiles[0].roles[0].arn }}"
+            
+ - name: Put/Replace nodeInstanceRole arn
+   replace:
+    path: "{{ansible_env.HOME}}/cortex-search-deployment/{{ cortex_infrastructure_ver }}/aws-auth-cm.yml"
+    regexp: '<.+>'
+    replace: "{{ nodeInstanceRole_arn }}"
+        
+ - name: Enable worker nodes to join cluster
+   command: "kubectl apply -f {{ansible_env.HOME}}/cortex-search-deployment/{{ cortex_infrastructure_ver }}/aws-auth-cm.yml"
+     
+ - name: Clean-up aws cli profile and deployment dir 
+   include_role:
+    name: cleanup-aws-dir      

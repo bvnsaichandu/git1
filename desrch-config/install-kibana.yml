@@ -1,0 +1,21 @@
+# Installs Kibana and ES on eks cluster.You may wish to run pre-tasks only once.
+
+- hosts: logAggr_servers
+  remote_user: ubuntu
+  become: yes
+  become_user: root
+  gather_facts: False
+  vars_files:
+   - roles/curator/vars/log_aggr_vars.yml  
+  pre_tasks:
+   - name: Install python for Ansible
+     raw: test -e /usr/bin/python || (apt -y update && apt install -y python-minimal)
+     changed_when: False
+     become: yes
+   - setup: # aka gather_facts
+  roles:
+  - { role: java, become: yes }
+  - { role: elasticsearch, become: yes }
+  - { role: curator }
+  - { role: geerlingguy.kibana }  
+

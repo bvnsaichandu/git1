@@ -1,0 +1,10 @@
+- hosts: localhost
+  connection: local
+  pre_tasks:
+  - name: Ensure openshift module is installed
+    pip:
+      name: [ "openshift"]
+      extra_args: "--user"
+  roles:
+  - install-nginx-eks
+ 

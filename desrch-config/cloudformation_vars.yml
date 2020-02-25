@@ -1,0 +1,73 @@
+# The cloudformation stack names
+cortex_search_elk_stack: "{{ env }}-{{ project }}-elk-stack"
+cortex_search_vpc_stack: "{{ env }}-{{ project }}-vpc-stack"
+cortex_search_eks_stack: "{{ env }}-{{ project }}-eks-stack"
+cortex_search_node_group_stack: "{{ env }}-{{ project }}-node-group-stack"
+
+# IAM policy for reading S3 bucket
+cortex_search_s3_read_policy: "{{ env }}-{{ project }}-s3-read-policy"
+
+# IAM policy for reading S3 bucket
+cortex_search_s3_write_policy: "{{ env }}-{{ project }}-s3-write-policy"
+
+# IAM role assumed by logstash hosted on EC2 instance for reading S3 bucket
+cortex_search_s3_read_role: "{{ env }}-{{ project }}-s3-read-role"
+
+# IAM role assumed by prophecy minor hosted on EC2 instance for writing S3 bucket
+cortex_search_s3_write_role: "{{ env }}-{{ project }}-s3-write-role"
+
+# IAM instance profile
+cortex_search_logstash_instance_profile: "{{ env }}-{{ project }}-logstash-instance-profile"
+
+# IAM instance profile
+cortex_search_prophecy_instance_profile: "{{ env }}-{{ project }}-prophecy-instance-profile"
+
+# Security group name for EC2 instance
+cortex_search_sg: "{{ env }}-{{ project }}-security-group"
+
+# Security group name for artefactory access
+cortex_artefactory_accesss_sg: "{{ env }}-{{ project }}-artefactory-access-security-group"
+
+# Artifactory dns to ip mapping
+artefactory_dns_ip_mapping: "10.85.63.14 artifactory.veritas.com artifactory-pyml-auto-images-snapshots.cto.veritas.com artifactory-pyml-auto-images-public.cto.veritas.com artifactory-pyml-auto-images-releases.cto.veritas.com"
+
+# elk EC2 instance name
+elk_ec2_instance_name: "{{ env }}-{{ project }}-elk"
+
+# kibana EC2 instance name
+kibana_ec2_instance_name: "{{ env }}-{{ project }}-kibana"
+
+# image id
+ec2_image_id: ami-08692d171e3cf02d6
+cluster_worker_node_image_id: ami-00b95829322267382
+
+# cluster worker node EC2 instance type
+cluster_worker_node_ec2_instance_type: t2.medium
+
+# eks service role
+eks_service_role: "{{ env }}-{{ project }}-eks-service-role"
+
+# eks cluster node group min size
+eks_cluster_node_group_min_size: 1
+
+# eks cluster node group max size
+eks_cluster_node_group_max_size: 3
+
+# eks cluster node group desired  capacity
+eks_cluster_node_group_desired_capacity: 2
+
+# eks cluster worker nodes group
+eks_cluster_worker_node_group: "{{ env }}-{{ project }}-eks-cluster-worker-node-group"
+
+# cortex search node instance role
+cortex_search_node_instance_role: "{{ env }}-{{ project }}-node-instance-role"
+
+eks_cluster_control_plane_security_group: "{{ env }}-{{ project }}-control-plane-security-group"
+# Enable vpc stack only if you wants to create vpc.
+enable_vpc_stack: false
+enable_elk_stack: true
+enable_eks_stack: true
+enable_nodeGroup_stack: true
+# eks cluster ver
+eks_cluster_ver: "1.13"
+cortex_infrastructure_ver: "v0.1"
